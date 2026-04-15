@@ -72,8 +72,16 @@
 #define RTL_GENERIC_PHYID			0x001cc800
 
 /* RTL8211FSI/FSVG PTP 寄存器页 */
+#define RTL8211F_RESET  			BIT(15)
+#define RTL8211F_BMCR 				0x00
+
+#define RTL8211F_A43_PAGE			0xa43
+#define RTL8211F_PHYCR2				0x19
+#define RTL8211F_PAGSR				0x1f
+
 #define RTL8211F_E40_PAGE			0xe40
 #define RTL8211F_E41_PAGE			0xe41
+#define RTL8211F_E42_PAGE			0xe42
 #define RTL8211F_E43_PAGE			0xe43
 #define RTL8211F_E44_PAGE			0xe44
 
@@ -82,6 +90,14 @@
 #define RTL8211F_PTP_INSR			0x12
 #define RTL8211F_SYNCE_CTL			0x13
 
+/*
+ * 下面这组扩展 PTP 能力位和 PDELAY/TAI 寄存器定义，
+ * 是后面对齐 /home/harn/linux-5.10.y/drivers/net/phy/realtek/realtek_ptp.h
+ * 之后补进来的，当前主流程未必全部使用，但先与原 PTP 头文件保持一致。
+ */
+#define RTL8211F_UDP_CHKSUM_UPDATE		BIT(12)
+#define RTL8211F_P_DRFU_2STEP_INS		BIT(11)
+#define RTL8211F_P_DR_2STEP_INS			BIT(10)
 #define RTL8211F_PTP_CLK_CFG			0x10
 #define RTL8211F_PTP_CFG_NS_LO			0x11
 #define RTL8211F_PTP_CFG_NS_HI			0x12
@@ -89,15 +105,42 @@
 #define RTL8211F_PTP_CFG_S_MI			0x14
 #define RTL8211F_PTP_CFG_S_HI			0x15
 
+#define RTL8211F_P_DR_1STEP			BIT(7)
 #define RTL8211F_PTP_TRX_TS_STA			0x10
-#define RTL8211F_PTP_TRX_TS_INFO		0x11
-#define RTL8211F_PTP_TRX_TS_SH			0x12
+#define RTL8211F_AVB_802_1AS			BIT(5)
+#define RTL8211F_PTPV2_UDPIPV6			BIT(2)
+#define RTL8211F_PTPV1				BIT(1)
+
+#define RTL8211F_TRIGGER_GEN			BIT(1)
+#define RTL8211F_EVENT_CAPTURE			BIT(0)
+
+#define RTL8211F_PTP_TAI_CFG			0x10
+#define RTL8211F_PTP_TRIG_CFG			0x11
+#define RTL8211F_PTP_TAI_STA			0x12
+#define RTL8211F_PTP_TAI_TS_NS_LO		0x13
+#define RTL8211F_PTP_TAI_TS_NS_HI		0x14
+#define RTL8211F_PTP_TAI_TS_S_LO		0x15
+#define RTL8211F_PTP_TAI_TS_S_HI		0x16
+
+#define RTL8211F_TXTS_PDELAY_REQ_RDY		BIT(13)
+#define RTL8211F_TXTS_PDELAY_RSP_RDY		BIT(12)
+#define RTL8211F_RXTS_PDELAY_REQ_RDY		BIT(9)
+#define RTL8211F_RXTS_PDELAY_RSP_RDY		BIT(8)
+#define RTL8211F_TRXTS_MSGTYPE_SEL		(BIT(3) | BIT(2))
+#define RTL8211F_TRXTS_SYNC			0
+#define RTL8211F_TRXTS_DELAY_REQ		1
+#define RTL8211F_TRXTS_PDELAY_REQ		2
+#define RTL8211F_TRXTS_PDELAY_RSP		3
+#define RTL8211F_TRXTS_SEL			BIT(1)
+
+#define RTL8211F_PTP_TRX_TS_INFO		0x10
+#define RTL8211F_PTP_TRX_TS_SH			0x11
+#define RTL8211F_PTP_TRX_TS_SID			0x12
 #define RTL8211F_PTP_TRX_TS_NS_LO		0x13
 #define RTL8211F_PTP_TRX_TS_NS_HI		0x14
 #define RTL8211F_PTP_TRX_TS_S_LO		0x15
 #define RTL8211F_PTP_TRX_TS_S_MI		0x16
 #define RTL8211F_PTP_TRX_TS_S_HI		0x17
-#define RTL8211F_PTP_TRX_TS_SID			0x18
 
 #define RTL8211F_DR_2STEP_INS			BIT(9)
 #define RTL8211F_FU_2STEP_INS			BIT(8)
@@ -141,7 +184,13 @@ enum rtl8211f_msg_type {
 	RTL8211F_MSG_SYNC = 0,
 	RTL8211F_MSG_DELAY_REQ = 1,
 };
-
+/**
+ * @brief 
+ * SourcePortIdentity 字段
+ * @clk_identity: 8 bytes 设备指示
+ * @src_port_id: 2 bytes 源端口ID 即clk_identity指示的设备的网络端口。
+ * 
+ */
 struct rtl8211f_ptphdr {
 	u8 tsmt;
 	u8 ver;
@@ -186,7 +235,14 @@ struct rtl8211f_private {
 	struct mii_timestamper mii_ts;
 	struct rtl8211f_ptp *ptp;
 };
-
+/**
+ * @brief 
+ * @info 这个结构体是为了存储从 RTL8211F 读出的时间戳信息,
+ * @sh source port hash value
+ * @sid sequence ID of the PTP message
+ * @domain Transport specific message |  mesage type  all from info register 
+ * @tsmt PTP version filed from info register
+ */
 struct rtl8211f_trxstamp_meta {
 	u16 info;
 	__be16 sh;
@@ -339,10 +395,108 @@ static struct rtl8211f_ptphdr *rtl8211f_get_ptp_header_rx(struct sk_buff *skb,
 
 	return rtl8211f_get_ptp_header_l4(skb, iphdr, udphdr);
 }
-
+/**
+ * @brief 获取 skb 中的 私有信息结构体指针
+ * 
+ * @param skb 
+ * @return struct rtl8211f_skb_info* 类型的指针
+ */
 static struct rtl8211f_skb_info *rtl8211f_skb_info(struct sk_buff *skb)
 {
 	return (struct rtl8211f_skb_info *)skb->cb;
+}
+
+static int rtl8211f_write_page(struct phy_device *phydev, int page, int regnum,
+			       u16 val)
+{
+	int ret;
+
+	ret = phy_write_paged(phydev, page, regnum, val);
+	if (ret < 0)
+		dev_err_ratelimited(&phydev->mdio.dev,
+				    "ptp write failed: page=0x%x reg=0x%x ret=%d\n",
+				    page, regnum, ret);
+
+	return ret;
+}
+
+static int rtl8211f_read_page(struct phy_device *phydev, int page, int regnum)
+{
+	int ret;
+
+	ret = phy_read_paged(phydev, page, regnum);
+	if (ret < 0)
+		dev_err_ratelimited(&phydev->mdio.dev,
+				    "ptp read failed: page=0x%x reg=0x%x ret=%d\n",
+				    page, regnum, ret);
+
+	return ret;
+}
+/**
+ * @brief 根据消息类型从寄存器之中读最新的 stamp的元数据。
+ * 
+ * @param info 用于获取上游 rtl8211f_ptp 结构体指针
+ * @param msg_type 根据消息类型 
+ * @param rx 所需要获取的元数据是 最近的tx 或者 rx 类型的消息
+ * @param meta 元数据
+ * @param ts 最新的时间戳值
+ * @return int 
+ */
+
+static int rtl8211f_soft_reset(struct phy_device *phydev)
+{
+	int ret, val;
+	int timeout = 100;
+
+	val = phy_read(phydev, MII_BMCR);
+	if (val < 0)
+		return val;
+
+	ret = phy_write(phydev, MII_BMCR, val | BMCR_RESET);
+	if (ret < 0)
+		return ret;
+
+	do {
+		usleep_range(1000, 2000);
+		val = phy_read(phydev, MII_BMCR);
+		if (val < 0)
+			return val;
+		if (!(val & BMCR_RESET))
+			return 0;
+	} while (--timeout);
+
+	return -ETIMEDOUT;
+}
+void rtl8211f_ptp_phy_reset(struct phy_device *phydev)
+{
+    phy_write_paged(phydev, 0x0, 0x0, 0x9040);
+}
+/**
+ * Enable sync ethernet function
+ *
+ * After phy link-up, the value of (page 0xa43, 0x1a) should be 0x302e,
+ * and the value of (page 0xe40, 0x13) should be 0x1.
+ */
+void rtl8211f_sync_ethernet(struct phy_device *phydev)
+{
+    int val = 0;
+
+    /* 
+     Harn note:
+     0x09 GBCR 寄存器 
+     bit 12: MASTER/SLAVE Manual Configuration Enable: Manual MASTER/SLAVE configuration
+     bit 11: default MASTER/SLAVE Mode: value 0 Slave mode 
+     Bit 9: 1000Base-T Full Duplex Capable: 
+                                value 1 Advertise 
+                                value 0 Do not advertise 
+    */
+
+    phy_write(phydev, 0x09, 0x1200);
+    /* 使能Sync-E 功能，此功能应用需要重启 */
+    
+    val = phy_read_paged(phydev, RTL8211F_E40_PAGE, RTL8211F_SYNCE_CTL);
+    val |= RTL8211F_SYNC_E_ENABLE;
+    phy_write_paged(phydev, RTL8211F_E40_PAGE, RTL8211F_SYNCE_CTL, val);
 }
 
 static int rtl8211f_get_trxstamp(struct ptp_clock_info *info, u8 msg_type,
@@ -355,66 +509,121 @@ static int rtl8211f_get_trxstamp(struct ptp_clock_info *info, u8 msg_type,
 	val = RTL8211F_TRXTS_OVERWR_EN | (msg_type << 2) |
 	      ((rx ? RTL8211F_TRXTS_RX : RTL8211F_TRXTS_TX) << 1) |
 	      RTL8211F_TRXTS_RD;
-	phy_write_paged(ptp->phydev, RTL8211F_E43_PAGE, RTL8211F_PTP_TRX_TS_STA,
-			val);
+	val = rtl8211f_write_page(ptp->phydev, RTL8211F_E43_PAGE,
+				  RTL8211F_PTP_TRX_TS_STA, val);
+	if (val < 0)
+		return val;
 
 	if (meta) {
-		meta->info = phy_read_paged(ptp->phydev, RTL8211F_E44_PAGE,
-					    RTL8211F_PTP_TRX_TS_INFO);
-		meta->sh = cpu_to_be16(phy_read_paged(ptp->phydev,
-						      RTL8211F_E44_PAGE,
-						      RTL8211F_PTP_TRX_TS_SH));
-		meta->sid = cpu_to_be16(phy_read_paged(ptp->phydev,
-						       RTL8211F_E44_PAGE,
-						       RTL8211F_PTP_TRX_TS_SID));
+		val = rtl8211f_read_page(ptp->phydev, RTL8211F_E44_PAGE,
+					 RTL8211F_PTP_TRX_TS_INFO);
+		if (val < 0)
+			return val;
+		meta->info = val;
+		val = rtl8211f_read_page(ptp->phydev, RTL8211F_E44_PAGE,
+					 RTL8211F_PTP_TRX_TS_SH);
+		if (val < 0)
+			return val;
+		meta->sh = cpu_to_be16(val);
+		val = rtl8211f_read_page(ptp->phydev, RTL8211F_E44_PAGE,
+					 RTL8211F_PTP_TRX_TS_SID);
+		if (val < 0)
+			return val;
+		meta->sid = cpu_to_be16(val);
 		meta->domain = meta->info >> 8;
 		meta->tsmt = meta->info & GENMASK(3, 0);
 	}
 
-	val = phy_read_paged(ptp->phydev, RTL8211F_E44_PAGE,
-			     RTL8211F_PTP_TRX_TS_S_HI);
+	val = rtl8211f_read_page(ptp->phydev, RTL8211F_E44_PAGE,
+				 RTL8211F_PTP_TRX_TS_S_HI);
+	if (val < 0)
+		return val;
 	ts->tv_sec = val;
-	ts->tv_sec = (ts->tv_sec << 16) |
-		     phy_read_paged(ptp->phydev, RTL8211F_E44_PAGE,
-				    RTL8211F_PTP_TRX_TS_S_MI);
-	ts->tv_sec = (ts->tv_sec << 16) |
-		     phy_read_paged(ptp->phydev, RTL8211F_E44_PAGE,
-				    RTL8211F_PTP_TRX_TS_S_LO);
+	val = rtl8211f_read_page(ptp->phydev, RTL8211F_E44_PAGE,
+				 RTL8211F_PTP_TRX_TS_S_MI);
+	if (val < 0)
+		return val;
+	ts->tv_sec = (ts->tv_sec << 16) | val;
+	val = rtl8211f_read_page(ptp->phydev, RTL8211F_E44_PAGE,
+				 RTL8211F_PTP_TRX_TS_S_LO);
+	if (val < 0)
+		return val;
+	ts->tv_sec = (ts->tv_sec << 16) | val;
 
-	val = phy_read_paged(ptp->phydev, RTL8211F_E44_PAGE,
-			     RTL8211F_PTP_TRX_TS_NS_HI);
+	val = rtl8211f_read_page(ptp->phydev, RTL8211F_E44_PAGE,
+				 RTL8211F_PTP_TRX_TS_NS_HI);
+	if (val < 0)
+		return val;
 	ts->tv_nsec = val & 0x3fff;
-	ts->tv_nsec = (ts->tv_nsec << 16) |
-		      phy_read_paged(ptp->phydev, RTL8211F_E44_PAGE,
-				     RTL8211F_PTP_TRX_TS_NS_LO);
+	val = rtl8211f_read_page(ptp->phydev, RTL8211F_E44_PAGE,
+				 RTL8211F_PTP_TRX_TS_NS_LO);
+	if (val < 0)
+		return val;
+	ts->tv_nsec = (ts->tv_nsec << 16) | val;
 
 	return 0;
 }
 
-static int rtl8211f_match_hwstamp(struct rtl8211f_ptphdr *ptphdr,
-				  const struct rtl8211f_trxstamp_meta *meta,
-				  u8 msg_type)
+/*
+ * 按 Realtek 应用说明中的规则计算 SourcePortIdentity hash：
+ * 1. 将 8-byte clockIdentity 扩展为 10-byte SourcePortIdentity
+ *    对 IEEE 1588 v1：在第 4/5 字节插入 0x00 0x00
+ *    对 IEEE 1588 v2/802.1AS：直接拼接 8-byte clockIdentity + 2-byte sourcePortNumber
+ * 2. 每 2 字节求和
+ * 3. 将高 16-bit 与低 16-bit 相加，得到 16-bit hash
+ */
+static u16 rtl8211f_source_port_hash(struct rtl8211f_ptphdr *ptphdr)
 {
-	int score = 0;
+	u8 spi[10];
+	u32 sum;
+	int i;
 
-	if (!ptphdr || ((ptphdr->tsmt & 0xf) != msg_type))
-		return -1;
+	if ((ptphdr->ver & 0xf) == 1) {
+		memcpy(&spi[0], &ptphdr->clk_identity, 3);
+		spi[3] = 0x00;
+		spi[4] = 0x00;
+		memcpy(&spi[5], ((u8 *)&ptphdr->clk_identity) + 3, 5);
+	} else {//这里做的是还原成大端法然后想加
+		memcpy(&spi[0], &ptphdr->clk_identity, 8);
+		//硬件是按照大端的顺序直接截断相加的，并没有转换位实际值。所以只需要按照大端法的排列组合成数字，加起来就可以
+		spi[8] = ((__force u16)ptphdr->src_port_id >> 8) & 0xff;
+		spi[9] = (__force u16)ptphdr->src_port_id & 0xff;
+	}
 
-	score = 1;
+	sum = 0;
+	// 因为123456 变成小端是654321 ，但是只需要保证每次操作的两个数的顺序正确，相加顺序无所谓
+	for (i = 0; i < ARRAY_SIZE(spi); i += 2)
+		sum += ((u16)spi[i] << 8) | spi[i + 1];
 
-	if (meta->tsmt == msg_type)
-		score++;
+	return (sum & 0xffff) + (sum >> 16);
+}
 
-	if (ptphdr->seq_id == meta->sid)
-		score += 4;
+static bool rtl8211f_match_hwstamp(struct rtl8211f_ptphdr *ptphdr,
+				   const struct rtl8211f_trxstamp_meta *meta,
+				   u8 msg_type)
+{
+	u16 src_port_hash;
 
-	if (ptphdr->src_port_id == meta->sh)
-		score += 2;
+	if (!ptphdr)
+		return false;
 
-	if (ptphdr->domain == meta->domain)
-		score++;
+	if ((ptphdr->tsmt & 0xf) != msg_type)
+		return false;
 
-	return score;
+	if (meta->tsmt != msg_type)
+		return false;
+
+	if (ptphdr->seq_id != meta->sid)
+		return false;
+
+	src_port_hash = rtl8211f_source_port_hash(ptphdr);
+	if (src_port_hash != be16_to_cpu(meta->sh))
+		return false;
+
+	if (ptphdr->domain != meta->domain)
+		return false;
+
+	return true;
 }
 
 static bool rtl8211f_rxts_expired(const struct rtl8211f_rxts *rxts)
@@ -445,8 +654,10 @@ static bool rtl8211f_match_rxts_skb(struct sk_buff *skb,
 	if (!ptphdr)
 		return false;
 
-	return rtl8211f_match_hwstamp(ptphdr, &rxts->meta, rxts->msg_type) >= 0;
+	return rtl8211f_match_hwstamp(ptphdr, &rxts->meta, rxts->msg_type);
 }
+
+static void rtl8211f_prune_tx_queue(struct rtl8211f_ptp *ptp);
 
 static void rtl8211f_complete_rxskb(struct sk_buff *skb,
 				    const struct timespec64 *ts)
@@ -464,19 +675,24 @@ static void rtl8211f_rx_timestamp_work(struct work_struct *work)
 	struct rtl8211f_ptp *ptp =
 		container_of(work, struct rtl8211f_ptp, ts_work.work);
 	struct sk_buff *skb;
+	bool resched = false;
 
 	while ((skb = skb_dequeue(&ptp->rx_queue))) {
 		struct rtl8211f_skb_info *skb_info = rtl8211f_skb_info(skb);
 
 		if (!time_after(jiffies, skb_info->tmo)) {
 			skb_queue_head(&ptp->rx_queue, skb);
+			resched = true;
 			break;
 		}
 
 		netif_rx_ni(skb);
 	}
 
-	if (!skb_queue_empty(&ptp->rx_queue))
+	rtl8211f_prune_tx_queue(ptp);
+
+	if (resched || !skb_queue_empty(&ptp->rx_queue) ||
+	    !skb_queue_empty(&ptp->tx_queue))
 		schedule_delayed_work(&ptp->ts_work,
 				      RTL8211F_SKB_TIMESTAMP_TIMEOUT);
 }
@@ -498,8 +714,8 @@ static void rtl8211f_adjust_mode_set(struct ptp_clock_info *info, u8 mode)
 {
 	struct rtl8211f_ptp *ptp = container_of(info, struct rtl8211f_ptp, caps);
 
-	phy_write_paged(ptp->phydev, RTL8211F_E41_PAGE, RTL8211F_PTP_CLK_CFG,
-			(mode << 1) | 0x1);
+	rtl8211f_write_page(ptp->phydev, RTL8211F_E41_PAGE,
+			    RTL8211F_PTP_CLK_CFG, (mode << 1) | 0x1);
 }
 
 static int rtl8211f_gettime(struct ptp_clock_info *info, struct timespec64 *ts)
@@ -510,45 +726,75 @@ static int rtl8211f_gettime(struct ptp_clock_info *info, struct timespec64 *ts)
 	mutex_lock(&ptp->ts_mutex);
 	rtl8211f_adjust_mode_set(info, RTL8211F_DIRECT_READ);
 
-	val = phy_read_paged(ptp->phydev, RTL8211F_E41_PAGE, RTL8211F_PTP_CFG_S_HI);
+	val = rtl8211f_read_page(ptp->phydev, RTL8211F_E41_PAGE,
+				 RTL8211F_PTP_CFG_S_HI);
+	if (val < 0)
+		goto out_unlock_gettime;
 	ts->tv_sec = val;
-	ts->tv_sec = (ts->tv_sec << 16) |
-		     phy_read_paged(ptp->phydev, RTL8211F_E41_PAGE,
-				    RTL8211F_PTP_CFG_S_MI);
-	ts->tv_sec = (ts->tv_sec << 16) |
-		     phy_read_paged(ptp->phydev, RTL8211F_E41_PAGE,
-				    RTL8211F_PTP_CFG_S_LO);
+	val = rtl8211f_read_page(ptp->phydev, RTL8211F_E41_PAGE,
+				 RTL8211F_PTP_CFG_S_MI);
+	if (val < 0)
+		goto out_unlock_gettime;
+	ts->tv_sec = (ts->tv_sec << 16) | val;
+	val = rtl8211f_read_page(ptp->phydev, RTL8211F_E41_PAGE,
+				 RTL8211F_PTP_CFG_S_LO);
+	if (val < 0)
+		goto out_unlock_gettime;
+	ts->tv_sec = (ts->tv_sec << 16) | val;
 
-	val = phy_read_paged(ptp->phydev, RTL8211F_E41_PAGE, RTL8211F_PTP_CFG_NS_HI);
+	val = rtl8211f_read_page(ptp->phydev, RTL8211F_E41_PAGE,
+				 RTL8211F_PTP_CFG_NS_HI);
+	if (val < 0)
+		goto out_unlock_gettime;
 	ts->tv_nsec = val;
-	ts->tv_nsec = (ts->tv_nsec << 16) |
-		      phy_read_paged(ptp->phydev, RTL8211F_E41_PAGE,
-				     RTL8211F_PTP_CFG_NS_LO);
+	val = rtl8211f_read_page(ptp->phydev, RTL8211F_E41_PAGE,
+				 RTL8211F_PTP_CFG_NS_LO);
+	if (val < 0)
+		goto out_unlock_gettime;
+	ts->tv_nsec = (ts->tv_nsec << 16) | val;
+	val = 0;
+out_unlock_gettime:
 	mutex_unlock(&ptp->ts_mutex);
 
-	return 0;
+	return val;
 }
 
 static int rtl8211f_settime(struct ptp_clock_info *info,
 			    const struct timespec64 *ts)
 {
 	struct rtl8211f_ptp *ptp = container_of(info, struct rtl8211f_ptp, caps);
+	int ret;
 
 	mutex_lock(&ptp->ts_mutex);
-	phy_write_paged(ptp->phydev, RTL8211F_E41_PAGE, RTL8211F_PTP_CFG_S_HI,
-			(ts->tv_sec >> 32) & 0xffff);
-	phy_write_paged(ptp->phydev, RTL8211F_E41_PAGE, RTL8211F_PTP_CFG_S_MI,
-			(ts->tv_sec >> 16) & 0xffff);
-	phy_write_paged(ptp->phydev, RTL8211F_E41_PAGE, RTL8211F_PTP_CFG_S_LO,
-			ts->tv_sec & 0xffff);
-	phy_write_paged(ptp->phydev, RTL8211F_E41_PAGE, RTL8211F_PTP_CFG_NS_HI,
-			(ts->tv_nsec >> 16) & 0xffff);
-	phy_write_paged(ptp->phydev, RTL8211F_E41_PAGE, RTL8211F_PTP_CFG_NS_LO,
-			ts->tv_nsec & 0xffff);
+	ret = rtl8211f_write_page(ptp->phydev, RTL8211F_E41_PAGE,
+				  RTL8211F_PTP_CFG_S_HI,
+				  (ts->tv_sec >> 32) & 0xffff);
+	if (ret < 0)
+		goto out_unlock_settime;
+	ret = rtl8211f_write_page(ptp->phydev, RTL8211F_E41_PAGE,
+				  RTL8211F_PTP_CFG_S_MI,
+				  (ts->tv_sec >> 16) & 0xffff);
+	if (ret < 0)
+		goto out_unlock_settime;
+	ret = rtl8211f_write_page(ptp->phydev, RTL8211F_E41_PAGE,
+				  RTL8211F_PTP_CFG_S_LO, ts->tv_sec & 0xffff);
+	if (ret < 0)
+		goto out_unlock_settime;
+	ret = rtl8211f_write_page(ptp->phydev, RTL8211F_E41_PAGE,
+				  RTL8211F_PTP_CFG_NS_HI,
+				  (ts->tv_nsec >> 16) & 0xffff);
+	if (ret < 0)
+		goto out_unlock_settime;
+	ret = rtl8211f_write_page(ptp->phydev, RTL8211F_E41_PAGE,
+				  RTL8211F_PTP_CFG_NS_LO, ts->tv_nsec & 0xffff);
+	if (ret < 0)
+		goto out_unlock_settime;
 	rtl8211f_adjust_mode_set(info, RTL8211F_DIRECT_WRITE);
+	ret = 0;
+out_unlock_settime:
 	mutex_unlock(&ptp->ts_mutex);
 
-	return 0;
+	return ret;
 }
 
 static int rtl8211f_adjtime(struct ptp_clock_info *info, s64 delta)
@@ -556,6 +802,7 @@ static int rtl8211f_adjtime(struct ptp_clock_info *info, s64 delta)
 	struct rtl8211f_ptp *ptp = container_of(info, struct rtl8211f_ptp, caps);
 	u64 sec_diff, nsec_diff;
 	bool negative = false;
+	int ret;
 
 	if (delta < 0) {
 		delta = -delta;
@@ -566,36 +813,76 @@ static int rtl8211f_adjtime(struct ptp_clock_info *info, s64 delta)
 	nsec_diff = delta - sec_diff * NSEC_PER_SEC;
 
 	mutex_lock(&ptp->ts_mutex);
-	phy_write_paged(ptp->phydev, RTL8211F_E41_PAGE, RTL8211F_PTP_CFG_NS_LO,
-			nsec_diff & 0xffff);
-	phy_write_paged(ptp->phydev, RTL8211F_E41_PAGE, RTL8211F_PTP_CFG_NS_HI,
-			(nsec_diff >> 16) & 0x3fff);
-	phy_write_paged(ptp->phydev, RTL8211F_E41_PAGE, RTL8211F_PTP_CFG_S_LO,
-			sec_diff & 0xffff);
-	phy_write_paged(ptp->phydev, RTL8211F_E41_PAGE, RTL8211F_PTP_CFG_S_MI,
-			(sec_diff >> 16) & 0xffff);
-	phy_write_paged(ptp->phydev, RTL8211F_E41_PAGE, RTL8211F_PTP_CFG_S_HI,
-			(sec_diff >> 32) & 0xffff);
+	ret = rtl8211f_write_page(ptp->phydev, RTL8211F_E41_PAGE,
+				  RTL8211F_PTP_CFG_NS_LO, nsec_diff & 0xffff);
+	if (ret < 0)
+		goto out_unlock_adjtime;
+	ret = rtl8211f_write_page(ptp->phydev, RTL8211F_E41_PAGE,
+				  RTL8211F_PTP_CFG_NS_HI,
+				  (nsec_diff >> 16) & 0x3fff);
+	if (ret < 0)
+		goto out_unlock_adjtime;
+	ret = rtl8211f_write_page(ptp->phydev, RTL8211F_E41_PAGE,
+				  RTL8211F_PTP_CFG_S_LO, sec_diff & 0xffff);
+	if (ret < 0)
+		goto out_unlock_adjtime;
+	ret = rtl8211f_write_page(ptp->phydev, RTL8211F_E41_PAGE,
+				  RTL8211F_PTP_CFG_S_MI,
+				  (sec_diff >> 16) & 0xffff);
+	if (ret < 0)
+		goto out_unlock_adjtime;
+	ret = rtl8211f_write_page(ptp->phydev, RTL8211F_E41_PAGE,
+				  RTL8211F_PTP_CFG_S_HI,
+				  (sec_diff >> 32) & 0xffff);
+	if (ret < 0)
+		goto out_unlock_adjtime;
 	rtl8211f_adjust_mode_set(info, negative ? RTL8211F_DECREMENT_STEP :
 					 RTL8211F_INCREMENT_STEP);
+	ret = 0;
+out_unlock_adjtime:
 	mutex_unlock(&ptp->ts_mutex);
 
-	return 0;
+	return ret;
 }
 
 static int rtl8211f_adjfreq(struct ptp_clock_info *info, s32 delta)
 {
 	struct rtl8211f_ptp *ptp = container_of(info, struct rtl8211f_ptp, caps);
+	int ret;
 
 	mutex_lock(&ptp->ts_mutex);
-	phy_write_paged(ptp->phydev, RTL8211F_E41_PAGE, RTL8211F_PTP_CFG_NS_HI,
-			(delta >> 16) & 0xffff);
-	phy_write_paged(ptp->phydev, RTL8211F_E41_PAGE, RTL8211F_PTP_CFG_NS_LO,
-			delta & 0xffff);
+	ret = rtl8211f_write_page(ptp->phydev, RTL8211F_E41_PAGE,
+				  RTL8211F_PTP_CFG_NS_HI,
+				  (delta >> 16) & 0xffff);
+	if (ret < 0)
+		goto out_unlock_adjfreq;
+	ret = rtl8211f_write_page(ptp->phydev, RTL8211F_E41_PAGE,
+				  RTL8211F_PTP_CFG_NS_LO, delta & 0xffff);
+	if (ret < 0)
+		goto out_unlock_adjfreq;
 	rtl8211f_adjust_mode_set(info, RTL8211F_RATE_WRITE);
+	ret = 0;
+out_unlock_adjfreq:
 	mutex_unlock(&ptp->ts_mutex);
 
-	return 0;
+	return ret;
+}
+
+static void rtl8211f_prune_tx_queue(struct rtl8211f_ptp *ptp)
+{
+	struct sk_buff *skb, *tmp;
+
+	spin_lock_irq(&ptp->tx_queue_lock);
+	skb_queue_walk_safe(&ptp->tx_queue, skb, tmp) {
+		struct rtl8211f_skb_info *skb_info = rtl8211f_skb_info(skb);
+
+		if (!time_after(jiffies, skb_info->tmo))
+			continue;
+
+		__skb_unlink(skb, &ptp->tx_queue);
+		kfree_skb(skb);
+	}
+	spin_unlock_irq(&ptp->tx_queue_lock);
 }
 
 static int rtl8211f_hwtstamp(struct mii_timestamper *mii_ts, struct ifreq *ifr)
@@ -647,7 +934,12 @@ static int rtl8211f_hwtstamp(struct mii_timestamper *mii_ts, struct ifreq *ifr)
 	else if (cfg.tx_type == HWTSTAMP_TX_ONESTEP_SYNC)
 		mode |= RTL8211F_SYNC_1STEP | RTL8211F_PTP_ENABLE;
 
-	phy_write_paged(ptp->phydev, RTL8211F_E40_PAGE, RTL8211F_PTP_CTL, mode);
+	if (rtl8211f_write_page(ptp->phydev, RTL8211F_E40_PAGE,
+				RTL8211F_PTP_CTL, mode) < 0)
+		return -EIO;
+	
+	// rtl8211f_soft_reset(ptp->phydev);//重启
+
 	cancel_delayed_work_sync(&ptp->ts_work);
 
 	spin_lock_irq(&ptp->tx_queue_lock);
@@ -708,6 +1000,7 @@ static void rtl8211f_txtstamp(struct mii_timestamper *mii_ts,
 	spin_lock_irq(&priv->ptp->tx_queue_lock);
 	__skb_queue_tail(&priv->ptp->tx_queue, skb);
 	spin_unlock_irq(&priv->ptp->tx_queue_lock);
+	schedule_delayed_work(&priv->ptp->ts_work, RTL8211F_SKB_TIMESTAMP_TIMEOUT);
 }
 
 static bool rtl8211f_rxtstamp(struct mii_timestamper *mii_ts,
@@ -766,13 +1059,13 @@ static int rtl8211f_tx_queue_handle(struct rtl8211f_ptp *ptp, u8 message_type)
 {
 	struct rtl8211f_trxstamp_meta meta;
 	struct sk_buff *skb, *tmp, *best = NULL;
-	struct rtl8211f_ptphdr *ptphdr;
 	struct skb_shared_hwtstamps shhwtstamps;
 	struct timespec64 ts;
-	int best_score = -1;
-	int score;
+	int ret;
 
-	rtl8211f_get_trxstamp(&ptp->caps, message_type, false, &meta, &ts);
+	ret = rtl8211f_get_trxstamp(&ptp->caps, message_type, false, &meta, &ts);
+	if (ret < 0)
+		return ret;
 
 	spin_lock_irq(&ptp->tx_queue_lock);
 	if (skb_queue_empty(&ptp->tx_queue)) {
@@ -789,11 +1082,10 @@ static int rtl8211f_tx_queue_handle(struct rtl8211f_ptp *ptp, u8 message_type)
 			continue;
 		}
 
-		ptphdr = rtl8211f_get_ptp_header_tx(skb);
-		score = rtl8211f_match_hwstamp(ptphdr, &meta, message_type);
-		if (score > best_score) {
+		if (rtl8211f_match_hwstamp(rtl8211f_get_ptp_header_tx(skb), &meta,
+					   message_type)) {
 			best = skb;
-			best_score = score;
+			break;
 		}
 	}
 
@@ -818,22 +1110,23 @@ static int rtl8211f_rx_ts_handle(struct rtl8211f_ptp *ptp, u8 message_type)
 	struct sk_buff *skb, *tmp, *best = NULL;
 	struct timespec64 ts;
 	unsigned long flags;
+	int ret;
 
-	rtl8211f_get_trxstamp(&ptp->caps, message_type, true, &meta, &ts);
+	ret = rtl8211f_get_trxstamp(&ptp->caps, message_type, true, &meta, &ts);
+	if (ret < 0)
+		return ret;
 
 	spin_lock_irq(&ptp->rx_queue_lock);
 	skb_queue_walk_safe(&ptp->rx_queue, skb, tmp) {
-		struct rtl8211f_ptphdr *ptphdr;
-		int score;
-
-		ptphdr = rtl8211f_get_ptp_header_rx(skb, ptp->rx_filter);
-		score = rtl8211f_match_hwstamp(ptphdr, &meta, message_type);
-		if (score >= 0) {
-			__skb_unlink(skb, &ptp->rx_queue);
+		if (rtl8211f_match_hwstamp(rtl8211f_get_ptp_header_rx(skb,
+					      ptp->rx_filter),
+					  &meta, message_type)) {
 			best = skb;
 			break;
 		}
 	}
+	if (best)
+		__skb_unlink(best, &ptp->rx_queue);
 	spin_unlock_irq(&ptp->rx_queue_lock);
 
 	if (best) {
@@ -871,16 +1164,21 @@ static irqreturn_t rtl8211f_ptp_irq_handler(int irq, void *data)
 static int rtl8211f_irq_thread(void *arg)
 {
 	struct rtl8211f_ptp *ptp = arg;
-	u32 val;
+	int val;
 
 	while (!kthread_should_stop()) {
 		if (!wait_for_completion_interruptible_timeout(&ptp->complete,
 				msecs_to_jiffies(5000)))
 			continue;
 
-		phy_read_paged(ptp->phydev, RTL8211F_E40_PAGE, RTL8211F_PTP_INSR);
-		val = phy_read_paged(ptp->phydev, RTL8211F_E43_PAGE,
-				     RTL8211F_PTP_TRX_TS_STA);
+		val = rtl8211f_read_page(ptp->phydev, RTL8211F_E40_PAGE,
+					 RTL8211F_PTP_INSR);
+		if (val < 0)
+			continue;
+		val = rtl8211f_read_page(ptp->phydev, RTL8211F_E43_PAGE,
+					 RTL8211F_PTP_TRX_TS_STA);
+		if (val < 0)
+			continue;
 
 		if (val & RTL8211F_RXTS_SYNC_RDY)
 			rtl8211f_rx_ts_handle(ptp, RTL8211F_MSG_SYNC);
@@ -950,6 +1248,7 @@ static int rtl8211f_ptp_probe(struct phy_device *phydev)
 {
 	struct rtl8211f_private *priv;
 	struct rtl8211f_ptp *ptp;
+	int ret;
 
 	priv = devm_kzalloc(&phydev->mdio.dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
@@ -991,11 +1290,20 @@ static int rtl8211f_ptp_probe(struct phy_device *phydev)
 	phydev->priv = priv;
 	phydev->mii_ts = &priv->mii_ts;
 
-	phy_write_paged(phydev, RTL8211F_E40_PAGE, RTL8211F_SYNCE_CTL,
-			RTL8211F_SYNC_E_ENABLE);
-	phy_write_paged(phydev, RTL8211F_E40_PAGE, RTL8211F_PTP_INER,
-			RTL8211F_TX_TIMESTAMP | RTL8211F_RX_TIMESTAMP);
-	phy_write_paged(phydev, RTL8211F_E40_PAGE, RTL8211F_PTP_CTL, 0);
+	rtl8211f_sync_ethernet(phydev);
+	
+	//清除ptp功能，只保留使能后续进行重启
+	ret = rtl8211f_write_page(phydev, RTL8211F_E40_PAGE, RTL8211F_PTP_CTL, RTL8211F_PTP_ENABLE);
+	if (ret < 0)
+		return ret;
+	//重启
+	rtl8211f_ptp_phy_reset(phydev);
+	//重启后再配置寄存器
+	ret = rtl8211f_write_page(phydev, RTL8211F_E40_PAGE, RTL8211F_PTP_INER,
+				  RTL8211F_TX_TIMESTAMP | RTL8211F_RX_TIMESTAMP);
+	if (ret < 0)
+		return ret;
+	
 
 	ptp->ptp_clock = ptp_clock_register(&ptp->caps, &phydev->mdio.dev);
 	if (IS_ERR(ptp->ptp_clock))
