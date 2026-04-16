@@ -406,6 +406,17 @@ static struct rtl8211f_skb_info *rtl8211f_skb_info(struct sk_buff *skb)
 	return (struct rtl8211f_skb_info *)skb->cb;
 }
 
+static bool rtl8211f_is_sync_txskb(struct sk_buff *skb)
+{
+	struct rtl8211f_ptphdr *ptphdr;
+
+	ptphdr = rtl8211f_get_ptp_header_tx(skb);
+	if (!ptphdr)
+		return false;
+
+	return (ptphdr->tsmt & 0xf) == RTL8211F_MSG_SYNC;
+}
+
 static int rtl8211f_write_page(struct phy_device *phydev, int page, int regnum,
 			       u16 val)
 {
@@ -932,7 +943,8 @@ static int rtl8211f_hwtstamp(struct mii_timestamper *mii_ts, struct ifreq *ifr)
 		mode |= RTL8211F_DR_2STEP_INS | RTL8211F_FU_2STEP_INS |
 			RTL8211F_PTP_ENABLE;
 	else if (cfg.tx_type == HWTSTAMP_TX_ONESTEP_SYNC)
-		mode |= RTL8211F_SYNC_1STEP | RTL8211F_PTP_ENABLE;
+		mode |= RTL8211F_SYNC_1STEP | RTL8211F_UDP_CHKSUM_UPDATE |
+			RTL8211F_PTP_ENABLE;
 
 	if (rtl8211f_write_page(ptp->phydev, RTL8211F_E40_PAGE,
 				RTL8211F_PTP_CTL, mode) < 0)
@@ -991,6 +1003,19 @@ static void rtl8211f_txtstamp(struct mii_timestamper *mii_ts,
 	struct rtl8211f_skb_info *skb_info = rtl8211f_skb_info(skb);
 
 	if (!priv->ptp->configured || priv->ptp->tx_type == HWTSTAMP_TX_OFF) {
+		kfree_skb(skb);
+		return;
+	}
+
+	/*
+	 * One-step Sync is completed by the PHY while the frame is being
+	 * transmitted, so we must not leave a Sync skb waiting in the
+	 * normal two-step tx_queue path.
+	 * This sector is add only for filter one-step sync, because this kind of skb no need wait for timestamp
+	 * If dont need  remove follow sector code.
+	 */
+	if (priv->ptp->tx_type == HWTSTAMP_TX_ONESTEP_SYNC &&
+	    rtl8211f_is_sync_txskb(skb)) {
 		kfree_skb(skb);
 		return;
 	}
