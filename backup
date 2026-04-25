@@ -25,7 +25,6 @@
 #include <linux/udp.h>
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
-#include <uapi/linux/sched/types.h>
 
 #define RTL8211F_PTP_DEBUG			0
 #define RTL8211F_PTP_PROFILE			0
@@ -193,16 +192,10 @@
 #define RTL8211F_SKB_TIMESTAMP_TIMEOUT		50 /* jiffies */
 #define RTL8211F_TX_WAIT_SAMPLE_MS		1
 #define RTL8211F_TX_WAIT_SAMPLE_COUNT		120
-#define RTL8211F_PTP_IRQ_RT_PRIO_DEFAULT	50
 
 MODULE_DESCRIPTION("Realtek PHY driver with RTL8211FSI/FSVG PTP draft");
 MODULE_AUTHOR("people");
 MODULE_LICENSE("GPL");
-
-static int rtl8211f_ptp_irq_rt_prio = RTL8211F_PTP_IRQ_RT_PRIO_DEFAULT;
-module_param_named(ptp_irq_rt_prio, rtl8211f_ptp_irq_rt_prio, int, 0644);
-MODULE_PARM_DESC(ptp_irq_rt_prio,
-		 "SCHED_FIFO priority for RTL8211F PTP IRQ thread, 0 disables RT promotion");
 
 enum rtl8211f_ptp_clock_adj_mode {
 	RTL8211F_NO_FUNCTION = 0,
@@ -266,7 +259,6 @@ struct rtl8211f_ptp {
 	struct ptp_clock_info caps;
 	struct gpio_desc *ptp_int_gpiod;
 	struct delayed_work ts_work;
-	struct workqueue_struct *ts_wq;
 	struct sk_buff_head tx_queue;
 	struct sk_buff_head rx_queue;
 	struct rtl8211f_tx_pending tx_pending[RTL8211F_TX_PENDING_SLOTS];
@@ -1045,43 +1037,16 @@ static void rtl8211f_complete_rxskb(struct sk_buff *skb,
 	netif_rx_ni(skb);
 }
 
-static void rtl8211f_queue_ts_work(struct rtl8211f_ptp *ptp,
-				   unsigned long delay)
-{
-	if (ptp->ts_wq)
-		queue_delayed_work(ptp->ts_wq, &ptp->ts_work, delay);
-	else
-		schedule_delayed_work(&ptp->ts_work, delay);
-}
-
-static void rtl8211f_promote_irq_thread(struct rtl8211f_ptp *ptp)
-{
-	struct sched_param param;
-	int prio = rtl8211f_ptp_irq_rt_prio;
-
-	if (ptp->irq_thread_rt)
-		return;
-
-	if (prio <= 0) {
-		ptp->irq_thread_rt = true;
-		return;
-	}
-
-	if (prio >= MAX_RT_PRIO)
-		prio = MAX_RT_PRIO - 1;
-
-	param.sched_priority = prio;
-	WARN_ON_ONCE(sched_setscheduler_nocheck(current, SCHED_FIFO, &param));
-	ptp->irq_thread_rt = true;
-	RTL_PTP_DBG("RTL irq-thread: promote fifo prio=%d\n", prio);
-}
-
 static irqreturn_t rtl8211f_ptp_irq_thread(int irq, void *data)
 {
 	struct rtl8211f_ptp *ptp = data;
 	u32 val;
 
-	rtl8211f_promote_irq_thread(ptp);
+	if (!ptp->irq_thread_rt) {
+		sched_set_fifo(current);
+		ptp->irq_thread_rt = true;
+		RTL_PTP_DBG("RTL irq-thread: promote fifo\n");
+	}
 	/* read tx or rx timestamp interrupt status */
 	// phy_read_paged(ptp->phydev, RTL8211F_E40_PAGE, RTL8211F_PTP_INSR);
 	/* read tx/rx mesgsage interrupt status */
@@ -1158,7 +1123,8 @@ static void rtl8211f_rx_timestamp_work(struct work_struct *work)
 
 	if (resched || !skb_queue_empty(&ptp->rx_queue) ||
 	    !skb_queue_empty(&ptp->tx_queue))
-		rtl8211f_queue_ts_work(ptp, RTL8211F_SKB_TIMESTAMP_TIMEOUT);
+		schedule_delayed_work(&ptp->ts_work,
+				      RTL8211F_SKB_TIMESTAMP_TIMEOUT);
 }
 
 static void rtl8211f_reset_pending_rxts(struct rtl8211f_ptp *ptp)
@@ -1519,7 +1485,7 @@ static void rtl8211f_txtstamp(struct mii_timestamper *mii_ts,
 	__skb_queue_tail(&priv->ptp->tx_queue, skb);
 	spin_unlock_irq(&priv->ptp->tx_queue_lock);
 
-	rtl8211f_queue_ts_work(priv->ptp, RTL8211F_SKB_TIMESTAMP_TIMEOUT);
+	schedule_delayed_work(&priv->ptp->ts_work, RTL8211F_SKB_TIMESTAMP_TIMEOUT);
 }
 
 static bool rtl8211f_rxtstamp(struct mii_timestamper *mii_ts,
@@ -1583,7 +1549,7 @@ static bool rtl8211f_rxtstamp(struct mii_timestamper *mii_ts,
 	spin_lock_irq(&priv->ptp->rx_queue_lock);
 	__skb_queue_tail(&priv->ptp->rx_queue, skb);
 	spin_unlock_irq(&priv->ptp->rx_queue_lock);
-	rtl8211f_queue_ts_work(priv->ptp, RTL8211F_SKB_TIMESTAMP_TIMEOUT);
+	schedule_delayed_work(&priv->ptp->ts_work, RTL8211F_SKB_TIMESTAMP_TIMEOUT);
 
 	return true;
 }
@@ -1895,11 +1861,6 @@ static int rtl8211f_ptp_probe(struct phy_device *phydev)
 
 	ptp->phydev = phydev;
 	INIT_DELAYED_WORK(&ptp->ts_work, rtl8211f_rx_timestamp_work);
-	ptp->ts_wq = alloc_workqueue("rtl8211f-ptp-ts",
-				     WQ_HIGHPRI | WQ_UNBOUND | WQ_MEM_RECLAIM,
-				     1);
-	if (!ptp->ts_wq)
-		return -ENOMEM;
 	INIT_LIST_HEAD(&ptp->rxts);
 	INIT_LIST_HEAD(&ptp->rxpool);
 	mutex_init(&ptp->ts_mutex);
@@ -1989,8 +1950,6 @@ err_unregister_ptp_clock:
 	if (ptp->ptp_clock && !IS_ERR(ptp->ptp_clock))
 		ptp_clock_unregister(ptp->ptp_clock);
 err_out:
-	if (ptp->ts_wq)
-		destroy_workqueue(ptp->ts_wq);
 	return ret;
 }
 
@@ -2004,8 +1963,6 @@ static void rtl8211f_ptp_remove(struct phy_device *phydev)
 	if (priv->ptp->irq_enabled)
 		free_irq(priv->ptp->irq, priv->ptp);
 	cancel_delayed_work_sync(&priv->ptp->ts_work);
-	if (priv->ptp->ts_wq)
-		destroy_workqueue(priv->ptp->ts_wq);
 	if (priv->ptp->ptp_clock && !IS_ERR(priv->ptp->ptp_clock))
 		ptp_clock_unregister(priv->ptp->ptp_clock);
 
