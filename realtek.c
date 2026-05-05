@@ -312,6 +312,14 @@ struct rtl8211f_trxstamp_meta {
 	u8 ptpver;
 };
 
+struct rtl8211f_trxstamp_sample {
+	struct rtl8211f_trxstamp_meta meta;
+	struct timespec64 ts;
+	u8 msg_type;
+	bool rx;
+	bool valid;
+};
+
 struct rtl8211f_skb_info {
 	unsigned long tmo;
 	__be16 seq_id;
@@ -709,49 +717,50 @@ out_restore:
 
 static const char *rtl8211f_msg_name(u8 msg_type);
 
-static int rtl8211f_get_trxstamp(struct ptp_clock_info *info, u8 msg_type,
-				 bool rx, struct rtl8211f_trxstamp_meta *meta,
-				 struct timespec64 *ts)
+static int rtl8211f_read_trxstamp_locked(struct rtl8211f_ptp *ptp, u8 msg_type,
+					 bool rx,
+					 struct rtl8211f_trxstamp_meta *meta,
+					 struct timespec64 *ts)
 {
-	struct rtl8211f_ptp *ptp = container_of(info, struct rtl8211f_ptp, caps);
-	u64 __maybe_unused t_start, t_after_cmd, t_after_meta, t_after_sec, t_after_nsec;
-	int oldpage, ret;
+	int ret;
 	u16 val;
-#ifdef RTL8211F_PTP_PROFILE
+#if RTL8211F_PTP_PROFILE
+	u64 t_start, t_after_cmd, t_after_meta, t_after_sec, t_after_nsec;
+
 	t_start = ktime_get_ns();
 #endif
 	val = RTL8211F_TRXTS_OVERWR_EN | (msg_type << 2) |
 	      ((rx ? RTL8211F_TRXTS_RX : RTL8211F_TRXTS_TX) << 1) |
 	      RTL8211F_TRXTS_RD;
-	oldpage = phy_select_page(ptp->phydev, RTL8211F_E43_PAGE);
-	if (oldpage < 0)
-		return oldpage;
 
+	ret = rtl821x_write_page(ptp->phydev, RTL8211F_E43_PAGE);
+	if (ret < 0)
+		return ret;
 	ret = __phy_write(ptp->phydev, RTL8211F_PTP_TRX_TS_STA, val);
 	if (ret < 0)
-		goto out_restore;
-#ifdef RTL8211F_PTP_PROFILE
+		return ret;
+#if RTL8211F_PTP_PROFILE
 	t_after_cmd = ktime_get_ns();
 #endif
 	ret = rtl821x_write_page(ptp->phydev, RTL8211F_E44_PAGE);
 	if (ret < 0)
-		goto out_restore;
+		return ret;
 
 	if (meta) {
 		ret = rtl8211f_read_on_page(ptp->phydev,
 					     RTL8211F_PTP_TRX_TS_INFO, &val);
 		if (ret < 0)
-			goto out_restore;
+			return ret;
 		meta->info = val;
 		ret = rtl8211f_read_on_page(ptp->phydev,
 					     RTL8211F_PTP_TRX_TS_SH, &val);
 		if (ret < 0)
-			goto out_restore;
+			return ret;
 		meta->sh = cpu_to_be16(val);
 		ret = rtl8211f_read_on_page(ptp->phydev,
 					     RTL8211F_PTP_TRX_TS_SID, &val);
 		if (ret < 0)
-			goto out_restore;
+			return ret;
 		meta->sid = cpu_to_be16(val);
 		/*
 		 * PTP_TRX_TS_INFO (page 0xe44, addr 0x10):
@@ -765,49 +774,46 @@ static int rtl8211f_get_trxstamp(struct ptp_clock_info *info, u8 msg_type,
 					  meta->info);
 		meta->ptpver = FIELD_GET(RTL8211F_TRXTS_PTPVER_MASK,
 					 meta->info);
-#ifdef RTL8211F_PTP_PROFILE
+#if RTL8211F_PTP_PROFILE
 		t_after_meta = ktime_get_ns();
 	} else {
 		t_after_meta = t_after_cmd;
 	}
-#else 
+#else
 	}
 #endif
 
 	ret = rtl8211f_read_on_page(ptp->phydev, RTL8211F_PTP_TRX_TS_S_HI,
 				    &val);
 	if (ret < 0)
-		goto out_restore;
+		return ret;
 	ts->tv_sec = val;
 	ret = rtl8211f_read_on_page(ptp->phydev, RTL8211F_PTP_TRX_TS_S_MI,
 				    &val);
 	if (ret < 0)
-		goto out_restore;
+		return ret;
 	ts->tv_sec = (ts->tv_sec << 16) | val;
 	ret = rtl8211f_read_on_page(ptp->phydev, RTL8211F_PTP_TRX_TS_S_LO,
 				    &val);
 	if (ret < 0)
-		goto out_restore;
+		return ret;
 	ts->tv_sec = (ts->tv_sec << 16) | val;
-#ifdef RTL8211F_PTP_PROFILE
+#if RTL8211F_PTP_PROFILE
 	t_after_sec = ktime_get_ns();
 #endif
 	ret = rtl8211f_read_on_page(ptp->phydev, RTL8211F_PTP_TRX_TS_NS_HI,
 				    &val);
 	if (ret < 0)
-		goto out_restore;
+		return ret;
 	ts->tv_nsec = val & 0x3fff;
 	ret = rtl8211f_read_on_page(ptp->phydev, RTL8211F_PTP_TRX_TS_NS_LO,
 				    &val);
 	if (ret < 0)
-		goto out_restore;
+		return ret;
 	ts->tv_nsec = (ts->tv_nsec << 16) | val;
-#ifdef RTL8211F_PTP_PROFILE
+#if RTL8211F_PTP_PROFILE
 	t_after_nsec = ktime_get_ns();
 #endif
-	ret = phy_restore_page(ptp->phydev, oldpage, 0);
-	if (ret < 0)
-		return ret;
 
 	if (meta) {
 		RTL_PTP_DBG("RTL ts-%s: req_msg=%u(%s) hw_msg=%u(%s) transspec=%u ptpver=%u info=0x%04x seq_id=0x%04x src_hash=0x%04x time=%lld.%09lu\n",
@@ -823,6 +829,7 @@ static int rtl8211f_get_trxstamp(struct ptp_clock_info *info, u8 msg_type,
 			(long long)ts->tv_sec, ts->tv_nsec);
 	}
 
+#if RTL8211F_PTP_PROFILE
 	RTL_PTP_PERF("RTL ts-%s-lat: cmd=%lluns meta=%lluns sec=%lluns nsec=%lluns total=%lluns\n",
 		rx ? "rx" : "tx",
 		t_after_cmd - t_start,
@@ -830,16 +837,49 @@ static int rtl8211f_get_trxstamp(struct ptp_clock_info *info, u8 msg_type,
 		t_after_sec - t_after_meta,
 		t_after_nsec - t_after_sec,
 		t_after_nsec - t_start);
+#endif
 
 	return 0;
+}
 
-out_restore:
+static int rtl8211f_get_trxstamp(struct ptp_clock_info *info, u8 msg_type,
+				 bool rx, struct rtl8211f_trxstamp_meta *meta,
+				 struct timespec64 *ts)
+{
+	struct rtl8211f_ptp *ptp = container_of(info, struct rtl8211f_ptp, caps);
+	int oldpage, ret;
+
+	oldpage = phy_select_page(ptp->phydev, RTL8211F_E43_PAGE);
+	if (oldpage < 0)
+		return oldpage;
+
+	ret = rtl8211f_read_trxstamp_locked(ptp, msg_type, rx, meta, ts);
 	ret = phy_restore_page(ptp->phydev, oldpage, ret);
+	if (ret >= 0)
+		return 0;
+
 	dev_err_ratelimited(&ptp->phydev->mdio.dev,
 			    "ptp trxstamp burst failed: msg=%u rx=%u ret=%d\n",
 			    msg_type, rx, ret);
-
 	return ret;
+}
+
+static int rtl8211f_collect_trxstamp_locked(struct rtl8211f_ptp *ptp,
+					    struct rtl8211f_trxstamp_sample *sample,
+					    u8 msg_type, bool rx)
+{
+	int ret;
+
+	memset(sample, 0, sizeof(*sample));
+	sample->msg_type = msg_type;
+	sample->rx = rx;
+	ret = rtl8211f_read_trxstamp_locked(ptp, msg_type, rx, &sample->meta,
+					    &sample->ts);
+	if (ret < 0)
+		return ret;
+
+	sample->valid = true;
+	return 0;
 }
 
 /**
@@ -989,10 +1029,11 @@ static bool rtl8211f_match_rxts_skb(struct sk_buff *skb,
 }
 
 static void rtl8211f_prune_tx_queue(struct rtl8211f_ptp *ptp);
-static int rtl8211f_tx_queue_handle(struct rtl8211f_ptp *ptp, u8 message_type);
-static int rtl8211f_tx_queue_handle_ext(struct rtl8211f_ptp *ptp, u8 message_type,
+static int rtl8211f_tx_queue_handle_ext(struct rtl8211f_ptp *ptp,
+					const struct rtl8211f_trxstamp_sample *sample,
 					bool allow_expired_match);
-static int rtl8211f_rx_ts_handle(struct rtl8211f_ptp *ptp, u8 message_type);
+static int rtl8211f_rx_ts_handle_sample(struct rtl8211f_ptp *ptp,
+					const struct rtl8211f_trxstamp_sample *sample);
 
 static const char *rtl8211f_msg_name(u8 msg_type)
 {
@@ -1139,57 +1180,81 @@ static void rtl8211f_promote_irq_thread(struct rtl8211f_ptp *ptp)
 static irqreturn_t rtl8211f_ptp_irq_thread(int irq, void *data)
 {
 	struct rtl8211f_ptp *ptp = data;
-	u32 val;
+	struct rtl8211f_trxstamp_sample samples[8];
+	int oldpage, ret, i, nr = 0;
+	u16 val;
 
 	rtl8211f_promote_irq_thread(ptp);
-	/* read tx or rx timestamp interrupt status */
-	// phy_read_paged(ptp->phydev, RTL8211F_E40_PAGE, RTL8211F_PTP_INSR);
-	/* read tx/rx mesgsage interrupt status */
-	val = phy_read_paged(ptp->phydev, RTL8211F_E43_PAGE,
-			     RTL8211F_PTP_TRX_TS_STA);
 
-	if (val < 0)
+	oldpage = phy_select_page(ptp->phydev, RTL8211F_E43_PAGE);
+	if (oldpage < 0)
 		return IRQ_HANDLED;
+
+	ret = rtl8211f_read_on_page(ptp->phydev, RTL8211F_PTP_TRX_TS_STA, &val);
+	if (ret < 0)
+		goto out_restore;
 
 	if (val & RTL8211F_TXTS_SYNC_RDY) {
 		RTL_PTP_DBG("RTL irq-thread irq-tx: sync\n");
 		rtl8211f_log_trx_ts_sta("irq-tx", val);
-		rtl8211f_tx_queue_handle(ptp, RTL8211F_MSG_SYNC);
+		rtl8211f_collect_trxstamp_locked(ptp, &samples[nr++],
+						  RTL8211F_MSG_SYNC, false);
 	}
 	if (val & RTL8211F_TXTS_DELAY_REQ_RDY) {
 		RTL_PTP_DBG("RTL irq-thread irq-tx: dreq\n");
 		rtl8211f_log_trx_ts_sta("irq-tx", val);
-		rtl8211f_tx_queue_handle(ptp, RTL8211F_MSG_DELAY_REQ);
+		rtl8211f_collect_trxstamp_locked(ptp, &samples[nr++],
+						  RTL8211F_MSG_DELAY_REQ, false);
 	}
 	if (val & RTL8211F_TXTS_PDELAY_REQ_RDY) {
 		RTL_PTP_DBG("RTL irq-thread irq-tx: pdreq\n");
 		rtl8211f_log_trx_ts_sta("irq-tx", val);
-		rtl8211f_tx_queue_handle(ptp, RTL8211F_MSG_PDELAY_REQ);
+		rtl8211f_collect_trxstamp_locked(ptp, &samples[nr++],
+						  RTL8211F_MSG_PDELAY_REQ, false);
 	}
 	if (val & RTL8211F_TXTS_PDELAY_RSP_RDY) {
 		RTL_PTP_DBG("RTL irq-thread irq-tx: pdrsp\n");
 		rtl8211f_log_trx_ts_sta("irq-tx", val);
-		rtl8211f_tx_queue_handle(ptp, RTL8211F_MSG_PDELAY_RSP);
+		rtl8211f_collect_trxstamp_locked(ptp, &samples[nr++],
+						  RTL8211F_MSG_PDELAY_RSP, false);
 	}
 	if (val & RTL8211F_RXTS_SYNC_RDY) {
 		RTL_PTP_DBG("RTL irq-thread irq-rx: sync\n");
 		rtl8211f_log_trx_ts_sta("irq-rx", val);
-		rtl8211f_rx_ts_handle(ptp, RTL8211F_MSG_SYNC);
+		rtl8211f_collect_trxstamp_locked(ptp, &samples[nr++],
+						  RTL8211F_MSG_SYNC, true);
 	}
 	if (val & RTL8211F_RXTS_DELAY_REQ_RDY) {
 		RTL_PTP_DBG("RTL irq-thread irq-rx: dreq\n");
 		rtl8211f_log_trx_ts_sta("irq-rx", val);
-		rtl8211f_rx_ts_handle(ptp, RTL8211F_MSG_DELAY_REQ);
+		rtl8211f_collect_trxstamp_locked(ptp, &samples[nr++],
+						  RTL8211F_MSG_DELAY_REQ, true);
 	}
 	if (val & RTL8211F_RXTS_PDELAY_REQ_RDY) {
 		RTL_PTP_DBG("RTL irq-thread irq-rx: pdreq\n");
 		rtl8211f_log_trx_ts_sta("irq-rx", val);
-		rtl8211f_rx_ts_handle(ptp, RTL8211F_MSG_PDELAY_REQ);
+		rtl8211f_collect_trxstamp_locked(ptp, &samples[nr++],
+						  RTL8211F_MSG_PDELAY_REQ, true);
 	}
 	if (val & RTL8211F_RXTS_PDELAY_RSP_RDY) {
 		RTL_PTP_DBG("RTL irq-thread irq-rx: pdrsp\n");
 		rtl8211f_log_trx_ts_sta("irq-rx", val);
-		rtl8211f_rx_ts_handle(ptp, RTL8211F_MSG_PDELAY_RSP);
+		rtl8211f_collect_trxstamp_locked(ptp, &samples[nr++],
+						  RTL8211F_MSG_PDELAY_RSP, true);
+	}
+
+out_restore:
+	ret = phy_restore_page(ptp->phydev, oldpage, ret);
+	if (ret < 0)
+		return IRQ_HANDLED;
+
+	for (i = 0; i < nr; i++) {
+		if (!samples[i].valid)
+			continue;
+		if (samples[i].rx)
+			rtl8211f_rx_ts_handle_sample(ptp, &samples[i]);
+		else
+			rtl8211f_tx_queue_handle_ext(ptp, &samples[i], false);
 	}
 
 	return IRQ_HANDLED;
@@ -1568,6 +1633,11 @@ static void rtl8211f_txtstamp(struct mii_timestamper *mii_ts,
 	struct rtl8211f_ptphdr *ptphdr;
 
 	(void)type;
+	if (!(skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP)) {
+		kfree_skb(skb);
+		return;
+	}
+
 	//if off nothing to do 
 	if (!priv->ptp->configured || priv->ptp->tx_type == HWTSTAMP_TX_OFF) {
 		kfree_skb(skb);
@@ -1673,26 +1743,23 @@ static bool rtl8211f_rxtstamp(struct mii_timestamper *mii_ts,
 	return true;
 }
 
-static int rtl8211f_tx_queue_handle_ext(struct rtl8211f_ptp *ptp, u8 message_type,
+static int rtl8211f_tx_queue_handle_ext(struct rtl8211f_ptp *ptp,
+					const struct rtl8211f_trxstamp_sample *sample,
 					bool allow_expired_match)
 {
-	struct rtl8211f_trxstamp_meta meta;
+	const struct rtl8211f_trxstamp_meta *meta = &sample->meta;
 	struct rtl8211f_tx_pending *pending = NULL;
 	struct sk_buff *skb, *tmp, *best = NULL, *fallback = NULL;
 	struct skb_shared_hwtstamps shhwtstamps;
-	struct timespec64 ts;
 	u64 t_start, t_after_read, t_after_match, t_done;
 	u64 enqueue_ns = 0;
 	unsigned int walk_idx = 0;
 	unsigned int best_idx = 0;
 	unsigned int fallback_idx = 0;
 	bool best_from_fallback = false;
-	int ret;
-	
+	u8 message_type = sample->msg_type;
+		
 	t_start = ktime_get_ns();
-	ret = rtl8211f_get_trxstamp(&ptp->caps, message_type, false, &meta, &ts);
-	if (ret < 0)
-		return ret;
 	t_after_read = ktime_get_ns();
 
 	spin_lock_irq(&ptp->tx_queue_lock);
@@ -1703,8 +1770,8 @@ static int rtl8211f_tx_queue_handle_ext(struct rtl8211f_ptp *ptp, u8 message_typ
 
 	if (ptp->tx_fast_skb &&
 	    ptp->tx_fast_msgtype == message_type &&
-	    ptp->tx_fast_seq_id == meta.sid &&
-	    ptp->tx_fast_sh == meta.sh &&
+	    ptp->tx_fast_seq_id == meta->sid &&
+	    ptp->tx_fast_sh == meta->sh &&
 	    skb_queue_len(&ptp->tx_queue) == 1) {
 		best = ptp->tx_fast_skb;
 		best_idx = 0;
@@ -1755,8 +1822,8 @@ static int rtl8211f_tx_queue_handle_ext(struct rtl8211f_ptp *ptp, u8 message_typ
 
 		if (pending && pending->valid &&
 		    pending->msgtype == message_type &&
-		    pending->seq_id == meta.sid &&
-		    pending->sh == meta.sh) {
+		    pending->seq_id == meta->sid &&
+		    pending->sh == meta->sh) {
 			best = skb;
 			best_idx = walk_idx;
 			break;
@@ -1778,8 +1845,8 @@ tx_done_locked:
 		pending = rtl8211f_tx_pending_find(ptp, best);
 	if (pending && pending->valid &&
 	    pending->msgtype == message_type &&
-	    pending->seq_id == meta.sid &&
-	    pending->sh == meta.sh)
+	    pending->seq_id == meta->sid &&
+	    pending->sh == meta->sh)
 		enqueue_ns = pending->enqueue_ns;
 	if (best)
 		rtl8211f_tx_pending_clear(ptp, best);
@@ -1800,7 +1867,7 @@ tx_done_locked:
 		best_idx);
 
 	memset(&shhwtstamps, 0, sizeof(shhwtstamps));
-	shhwtstamps.hwtstamp = ktime_set(ts.tv_sec, ts.tv_nsec);
+	shhwtstamps.hwtstamp = ktime_set(sample->ts.tv_sec, sample->ts.tv_nsec);
 	skb_complete_tx_timestamp(best, &shhwtstamps);
 	t_done = ktime_get_ns();
 
@@ -1822,31 +1889,17 @@ tx_done_locked:
  * @param message_type message type of this timestamp EVENT Message, such as sync or delay_req.
  * @return int 
  */
-static int rtl8211f_tx_queue_handle(struct rtl8211f_ptp *ptp, u8 message_type)
+static int rtl8211f_rx_ts_handle_sample(struct rtl8211f_ptp *ptp,
+					const struct rtl8211f_trxstamp_sample *sample)
 {
-	return rtl8211f_tx_queue_handle_ext(ptp, message_type, false);
-}
-/**
- * @brief phy interrupt hander for rx skb.
- * 
- * @param ptp rtl8211f ptp data
- * @param message_type message type of this timestamp EVENT Message, such as sync or delay_req.
- * @return int 
- */
-static int rtl8211f_rx_ts_handle(struct rtl8211f_ptp *ptp, u8 message_type)
-{
-	struct rtl8211f_trxstamp_meta meta;
+	const struct rtl8211f_trxstamp_meta *meta = &sample->meta;
 	struct rtl8211f_rxts *rxts;
 	struct sk_buff *skb, *tmp, *best = NULL;
-	struct timespec64 ts;
 	unsigned int walk_idx = 0;
 	unsigned int best_idx = 0;
 	unsigned long flags;
-	int ret;
+	u8 message_type = sample->msg_type;
 
-	ret = rtl8211f_get_trxstamp(&ptp->caps, message_type, true, &meta, &ts);
-	if (ret < 0)
-		return ret;
 	/* matching */
 	spin_lock_irq(&ptp->rx_queue_lock);
 	skb_queue_walk_safe(&ptp->rx_queue, skb, tmp) {
@@ -1871,7 +1924,7 @@ static int rtl8211f_rx_ts_handle(struct rtl8211f_ptp *ptp, u8 message_type)
 			skb_info->tmo, jiffies);
 #endif
 
-		if (rtl8211f_match_hwstamp(ptphdr, &meta, message_type)) {
+		if (rtl8211f_match_hwstamp(ptphdr, meta, message_type)) {
 			best = skb;
 			best_idx = walk_idx;
 			break;
@@ -1885,7 +1938,7 @@ static int rtl8211f_rx_ts_handle(struct rtl8211f_ptp *ptp, u8 message_type)
 
 	if (best) {
 		RTL_PTP_DBG("RTL rxq-d: skb=%px idx=%u\n\n", best, best_idx);
-		rtl8211f_complete_rxskb(best, &ts);
+		rtl8211f_complete_rxskb(best, &sample->ts);
 		return 0;
 	}
 	/* no matching */
@@ -1899,8 +1952,8 @@ static int rtl8211f_rx_ts_handle(struct rtl8211f_ptp *ptp, u8 message_type)
 	rxts = list_first_entry(&ptp->rxpool, struct rtl8211f_rxts, list);
 	list_del_init(&rxts->list);
 	rxts->tmo = jiffies + RTL8211F_SKB_TIMESTAMP_TIMEOUT;
-	rxts->ts = ts;
-	rxts->meta = meta;
+	rxts->ts = sample->ts;
+	rxts->meta = *meta;
 	rxts->msg_type = message_type;
 	list_add_tail(&rxts->list, &ptp->rxts);
 	spin_unlock_irqrestore(&ptp->rx_ts_lock, flags);
